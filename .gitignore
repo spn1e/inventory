@@ -1,0 +1,64 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Node/JS
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.cache/
+dist/
+build/
+.vite/
+coverage/
+
+# Frontend build artifacts
+frontend/dist/
+frontend/build/
+
+# Logs
+*.log
+logs/
+smoke_logs/
+
+# Environment files
+.env
+.env.*
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints
+
+# ML models and artifacts
+ml_service/models/**
+!ml_service/models/.gitkeep
+*.pkl
+*.pt
+*.h5
+*.joblib
+
+# Uploads and generated data
+backend/uploads/
+uploads/
+
+# IDE/editor
+.vscode/
+.idea/
+*.iml
+
+# Docker local overrides
+docker-compose.override.yml
+
+# Misc
+*.swp
+*.swo
+# Windows reserved device filename present in repo root
+nul

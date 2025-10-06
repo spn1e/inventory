@@ -1,0 +1,143 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: inventory_db
+      POSTGRES_USER: inventory_user
+      POSTGRES_PASSWORD: inventory_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventory_user -d inventory_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  mlflow:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./ml_service:/app
+      - mlflow_data:/mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=file:///mlflow
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    command: >
+      sh -c "
+      apt-get update && apt-get install -y curl &&
+      pip install mlflow &&
+      mlflow server --backend-store-uri file:///mlflow --default-artifact-root /mlflow/artifacts --host 0.0.0.0 --port 5000
+      "
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -f http://localhost:5000/ || curl -f http://localhost:5000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  ml_service:
+    build:
+      context: ./ml_service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql://inventory_user:inventory_pass@postgres:5432/inventory_db
+      - POSTGRES_URL=postgresql://inventory_user:inventory_pass@postgres:5432/inventory_db
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGUSER=inventory_user
+      - PGPASSWORD=inventory_pass
+      - PGDATABASE=inventory_db
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./ml_service:/app
+      - model_data:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://inventory_user:inventory_pass@postgres:5432/inventory_db
+      - ML_SERVICE_URL=http://ml_service:8000
+      - ML_SERVICE_EXTERNAL_URL=http://localhost:8001
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=your_jwt_secret_change_in_production
+      - UPLOAD_MAX_SIZE=10485760
+      - FRONTEND_URL=http://localhost:5174
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+      - uploaded_files:/app/uploads
+      - ./scripts:/app/scripts
+      - ./sample_data:/app/sample_data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ml_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -q -O - http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5174:5173"
+    environment:
+      - VITE_BACKEND_URL=http://localhost:3001
+      - VITE_WS_URL=http://localhost:3001
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5173"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_data:
+  model_data:
+  uploaded_files:

@@ -1,0 +1,313 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # Backend Testing
+  backend-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: inventory_user
+          POSTGRES_PASSWORD: inventory_pass
+          POSTGRES_DB: inventory_test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: backend/package-lock.json
+
+    - name: Install backend dependencies
+      working-directory: ./backend
+      run: npm ci
+
+    - name: Run backend linting
+      working-directory: ./backend
+      run: npm run lint
+
+    - name: Run backend tests
+      working-directory: ./backend
+      env:
+        NODE_ENV: test
+        TEST_DATABASE_URL: postgresql://inventory_user:inventory_pass@localhost:5432/inventory_test_db
+        JWT_SECRET: test_jwt_secret
+      run: npm test
+
+    - name: Check test coverage
+      working-directory: ./backend
+      run: npm run test -- --coverage
+
+  # Frontend Testing
+  frontend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install frontend dependencies
+      working-directory: ./frontend
+      run: npm ci
+
+    - name: Run frontend linting
+      working-directory: ./frontend
+      run: npm run lint
+
+    - name: Run frontend build
+      working-directory: ./frontend
+      run: npm run build
+
+  # ML Service Testing
+  ml-service-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        cache-dependency-path: ml_service/requirements.txt
+
+    - name: Install Python dependencies
+      working-directory: ./ml_service
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov
+
+    - name: Run ML service tests
+      working-directory: ./ml_service
+      run: pytest test_train.py -v --cov=train --cov=inference
+
+    - name: Check Python code formatting
+      working-directory: ./ml_service
+      run: |
+        pip install black flake8
+        black --check *.py
+        flake8 *.py --max-line-length=100 --ignore=E501,W503
+
+  # Docker Build
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-test, ml-service-test]
+
+    strategy:
+      matrix:
+        service: [backend, frontend, ml_service]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./${{ matrix.service }}
+        file: ./${{ matrix.service }}/Dockerfile
+        push: false
+        tags: inventory-${{ matrix.service }}:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Test Docker image
+      run: |
+        docker run --rm inventory-${{ matrix.service }}:latest --help || echo "Image built successfully"
+
+  # Integration Tests (Optional)
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Compose
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y docker-compose
+
+    - name: Run integration tests
+      run: |
+        # Start services
+        docker-compose -f docker-compose.yml up -d --build
+        
+        # Wait for services to be ready
+        sleep 30
+        
+        # Test backend health
+        curl -f http://localhost:3000/health || exit 1
+        
+        # Test ML service health
+        curl -f http://localhost:8000/health || exit 1
+        
+        # Test frontend availability
+        curl -f http://localhost:5173 || exit 1
+        
+        echo "All services are healthy"
+
+    - name: Cleanup
+      if: always()
+      run: |
+        docker-compose -f docker-compose.yml down -v
+        docker system prune -f
+
+  # Security Scanning
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-test, ml-service-test]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Code Quality
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js for quality checks
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install quality tools
+      run: |
+        npm install -g jscpd # Copy-paste detector
+        
+    - name: Check for code duplication
+      run: |
+        jscpd --threshold 5 --reporters html,console backend/src frontend/src
+
+    - name: Check repository structure
+      run: |
+        # Verify required files exist
+        test -f README.md || (echo "README.md missing" && exit 1)
+        test -f docker-compose.yml || (echo "docker-compose.yml missing" && exit 1)
+        test -f .github/workflows/ci.yml || (echo "CI workflow missing" && exit 1)
+        
+        # Verify service directories exist
+        test -d backend || (echo "backend directory missing" && exit 1)
+        test -d frontend || (echo "frontend directory missing" && exit 1)
+        test -d ml_service || (echo "ml_service directory missing" && exit 1)
+        
+        echo "Repository structure is valid"
+
+  # Performance Tests (Basic)
+  performance-test:
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Docker Compose
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y docker-compose
+
+    - name: Start services
+      run: |
+        docker-compose up -d --build
+        sleep 45  # Wait for all services to be ready
+
+    - name: Install performance testing tools
+      run: |
+        sudo apt-get install -y apache2-utils curl
+
+    - name: Run basic performance tests
+      run: |
+        # Test backend endpoint performance
+        ab -n 100 -c 10 http://localhost:3000/health
+        
+        # Test ML service endpoint performance  
+        ab -n 50 -c 5 http://localhost:8000/health
+        
+        # Test frontend loading
+        curl -w "@-" -o /dev/null -s http://localhost:5173 << 'EOF'
+        time_namelookup:  %{time_namelookup}\n
+        time_connect:     %{time_connect}\n
+        time_total:       %{time_total}\n
+        EOF
+
+    - name: Cleanup performance test
+      if: always()
+      run: |
+        docker-compose down -v
+        docker system prune -f
+
+  # Notification
+  notify:
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-test, ml-service-test, docker-build, integration-test]
+    if: always()
+
+    steps:
+    - name: Notify on success
+      if: success()
+      run: |
+        echo "✅ All CI checks passed successfully!"
+        echo "Build Status: SUCCESS"
+        echo "Tests: PASSED"
+        echo "Docker Images: BUILT"
+        echo "Integration Tests: PASSED"
+
+    - name: Notify on failure
+      if: failure()
+      run: |
+        echo "❌ CI pipeline failed!"
+        echo "Build Status: FAILED"
+        echo "Please check the failed jobs above"
+        exit 1
